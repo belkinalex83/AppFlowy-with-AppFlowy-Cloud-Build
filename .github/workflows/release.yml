@@ -281,7 +281,6 @@ jobs:
       MACOS_DMG_NAME: ${{ matrix.environment }}_AppFlowy_${{ github.ref_name }}_macos-universal
       MACOS_CODESIGN_ID: ${{ secrets.MACOS_CODESIGN_ID }}
       MACOS_NOTARY_USER: ${{ secrets.MACOS_NOTARY_USER }}
-      MACOS_AARCH64_ZIP_NAME: AppFlowy-${{ github.ref_name }}-macos-universal.zip
     steps:
       - name: Checkout source code
         uses: actions/checkout@v3
@@ -312,13 +311,13 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rs/toolchain@v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           target: ${{ matrix.job.target }}
-          #override: true
+          override: true
           components: rustfmt
-          #profile: minimal
+          profile: minimal
 
       - name: Install prerequisites
         working-directory: frontend
@@ -398,6 +397,120 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.prepare.outputs.upload_url }}
+          asset_path: ${{ env.MACOS_APP_RELEASE_PATH }}/${{ env.MACOS_DMG_NAME }}.dmg
+          asset_name: ${{ env.MACOS_DMG_NAME }}.dmg
+          asset_content_type: application/octet-stream
+
+  build-for-macOS-universal-old:
+    name: ${{ matrix.job.target }} (${{ matrix.job.os }}) [${{ matrix.job.extra-build-args }}]
+    runs-on: ${{ matrix.job.os }}
+    needs: create-release
+    env:
+      MACOS_APP_RELEASE_PATH: frontend/appflowy_flutter/product/${{ github.ref_name }}/macos/Release
+      MACOS_AARCH64_ZIP_NAME: AppFlowy-${{ github.ref_name }}-macos-universal.zip
+      MACOS_DMG_NAME: AppFlowy-${{ github.ref_name }}-macos-universal
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - {
+              targets: "aarch64-apple-darwin,x86_64-apple-darwin",
+              os: macos-11,
+              extra-build-args: "",
+            }
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3
+
+      - name: Create Env file
+        run: |
+          cp dev.env .env
+          sed -i '' 's|CLOUD_TYPE=.*|CLOUD_TYPE=${{ secrets.CLOUD_TYPE }}|' .env
+
+          if [ "${{ secrets.CLOUD_TYPE }}" = "1" ]; then
+          sed -i '' 's|SUPABASE_URL=.*|SUPABASE_URL=${{ secrets.SUPABASE_URL }}|' .env
+          sed -i '' 's|SUPABASE_ANON_KEY=.*|SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}|' .env
+          elif [ "${{ secrets.CLOUD_TYPE }}" = "2" ]; then
+          sed -i '' 's|APPFLOWY_CLOUD_BASE_URL=.*|APPFLOWY_CLOUD_BASE_URL=${{ secrets.APPFLOWY_CLOUD_BASE_URL }}|' .env
+          sed -i '' 's|APPFLOWY_CLOUD_WS_BASE_URL=.*|APPFLOWY_CLOUD_WS_BASE_URL=${{ secrets.APPFLOWY_CLOUD_WS_BASE_URL }}|' .env
+          sed -i '' 's|APPFLOWY_CLOUD_GOTRUE_URL=.*|APPFLOWY_CLOUD_GOTRUE_URL=${{ secrets.APPFLOWY_CLOUD_GOTRUE_URL }}|' .env
+          fi
+        working-directory: frontend/appflowy_flutter
+        shell: bash
+
+      - name: Install flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.job.targets }}
+          components: rustfmt
+
+      - name: Install prerequisites
+        working-directory: frontend
+        run: |
+          cargo install --force cargo-make
+          cargo install --force duckscript_cli
+
+      - name: Build AppFlowy
+        working-directory: frontend
+        run: |
+          flutter config --enable-macos-desktop
+          sh scripts/flutter_release_build/build_universal_package_for_macos.sh
+
+      - name: Codesign AppFlowy
+        run: |
+          echo ${{ secrets.MACOS_CERTIFICATE }} | base64 --decode > certificate.p12
+          security create-keychain -p action build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p action build.keychain
+          security import certificate.p12 -k build.keychain -P ${{ secrets.MACOS_CERTIFICATE_PWD }} -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k action build.keychain
+          /usr/bin/codesign --force --options runtime --deep --sign "${{ secrets.MACOS_CODESIGN_ID }}" "${{ env.MACOS_APP_RELEASE_PATH }}/AppFlowy.app" -v
+
+      - name: Create macOS dmg
+        run: |
+          brew install create-dmg
+          create-dmg \
+          --volname ${{ env.MACOS_DMG_NAME }} \
+          --hide-extension "AppFlowy.app" \
+          --background frontend/scripts/dmg_assets/AppFlowyInstallerBackground.jpg \
+          --window-size 600 450 \
+          --icon-size 94 \
+          --icon "AppFlowy.app" 141 249 \
+          --app-drop-link 458 249 \
+          "${{ env.MACOS_APP_RELEASE_PATH }}/${{ env.MACOS_DMG_NAME }}.dmg" \
+          "${{ env.MACOS_APP_RELEASE_PATH }}/AppFlowy.app"
+
+      - name: Notarize AppFlowy
+        run: |
+          xcrun notarytool submit ${{ env.MACOS_APP_RELEASE_PATH }}/${{ env.MACOS_DMG_NAME }}.dmg --apple-id ${{ secrets.MACOS_NOTARY_USER }} --team-id ${{ secrets.MACOS_TEAM_ID }} --password ${{ secrets.MACOS_NOTARY_PWD }} -v -f "json" --wait
+
+      - name: Archive Asset
+        working-directory: ${{ env.MACOS_APP_RELEASE_PATH }}
+        run: zip --symlinks -qr ${{ env.MACOS_AARCH64_ZIP_NAME }} AppFlowy.app
+
+      - name: Upload Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ${{ env.MACOS_APP_RELEASE_PATH }}/${{ env.MACOS_AARCH64_ZIP_NAME }}
+          asset_name: ${{ env.MACOS_AARCH64_ZIP_NAME }}
+          asset_content_type: application/octet-stream
+
+      - name: Upload DMG Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ env.MACOS_APP_RELEASE_PATH }}/${{ env.MACOS_DMG_NAME }}.dmg
           asset_name: ${{ env.MACOS_DMG_NAME }}.dmg
           asset_content_type: application/octet-stream
