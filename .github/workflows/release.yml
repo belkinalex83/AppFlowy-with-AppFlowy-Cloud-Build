@@ -404,7 +404,7 @@ jobs:
   build-for-macOS-universal-old:
     name: ${{ matrix.job.target }} (${{ matrix.job.os }}) [${{ matrix.job.extra-build-args }}]
     runs-on: ${{ matrix.job.os }}
-    needs: create-release
+    needs: prepare
     env:
       MACOS_APP_RELEASE_PATH: frontend/appflowy_flutter/product/${{ github.ref_name }}/macos/Release
       MACOS_AARCH64_ZIP_NAME: AppFlowy-${{ github.ref_name }}-macos-universal.zip
